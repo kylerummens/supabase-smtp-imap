@@ -1,6 +1,6 @@
-# Supabase IMAP Server
+# Supabase SMTP/IMAP Server
 
-This is a simple IMAP server that uses Supabase as a backend for authentication and email storage. It follows the IMAP protocol and supports basic commands such as LOGIN, LOGOUT, SELECT, FETCH, and LIST.
+This is a simple SMTP/IMAP server that uses Supabase as a backend for authentication and email storage. It follows the SMTP and IMAP protocols to allow sending, receiving, and managing emails.
 
 This repo is a work in progress and is not yet ready for production use.
 
