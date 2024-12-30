@@ -3,7 +3,8 @@
   "module": "src/index.ts",
   "type": "module",
   "scripts": {
-    "start": "bun run src/index.ts",
+    "dev": "NODE_ENV=development bun src/index.ts",
+    "start": "bun src/index.ts",
     "test": "jest"
   },
   "dependencies": {
