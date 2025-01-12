@@ -1,155 +1,118 @@
-import { TLS_OPTIONS } from "../configs/tls";
+import { SMTPServer } from 'smtp-server';
+import type { SMTPServerOptions, SMTPServerAuthentication, SMTPServerSession } from 'smtp-server';
+import { createClient } from '@supabase/supabase-js';
+import { simpleParser } from 'mailparser';
 
-const SMTP_PORT = 587;
+// Initialize Supabase client
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// Types for SMTP session state
-type SMTPSession = {
-  mailFrom: string | null;
-  rcptTo: string[];
-  data: string[];
-  isInData: boolean;
-};
-
-// Command handlers
-function handleHelo(socket: any, args: string) {
-  // TODO: Implement proper HELO response with domain validation
-  socket.write("250 Hello\r\n");
+if (!supabaseUrl || !supabaseKey) {
+  throw new Error('Missing Supabase credentials. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables.');
 }
 
-function handleEhlo(socket: any, args: string) {
-  // TODO: Implement EHLO with capability list
-  socket.write("250-smtp.example.com\r\n");
-  socket.write("250-SIZE 35882577\r\n");
-  socket.write("250-8BITMIME\r\n");
-  socket.write("250 STARTTLS\r\n");
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+interface EmailData {
+  from_address: string;
+  to_addresses: string[];
+  subject?: string;
+  text_content?: string;
+  html_content?: string;
+  raw_email: string;
+  received_at: string;
 }
 
-function handleMailFrom(socket: any, session: SMTPSession, args: string) {
-  // TODO: Implement sender validation
-  const match = args.match(/<(.+)>/);
-  if (!match) {
-    socket.write("501 Syntax error in parameters or arguments\r\n");
-    return;
-  }
-  session.mailFrom = match[1];
-  socket.write("250 Sender OK\r\n");
-}
+const options: SMTPServerOptions = {
+  secure: false,
+  authOptional: true,
+  disabledCommands: ['STARTTLS'],
 
-function handleRcptTo(socket: any, session: SMTPSession, args: string) {
-  // TODO: Implement recipient validation
-  if (!session.mailFrom) {
-    socket.write("503 Bad sequence of commands\r\n");
-    return;
-  }
+  onAuth(auth: SMTPServerAuthentication, session: SMTPServerSession, callback) {
+    // TODO: validate credentials here
+    callback(null, { user: auth.username });
+  },
 
-  const match = args.match(/<(.+)>/);
-  if (!match) {
-    socket.write("501 Syntax error in parameters or arguments\r\n");
-    return;
-  }
+  onData(stream, session, callback) {
+    const chunks: Buffer[] = [];
 
-  session.rcptTo.push(match[1]);
-  socket.write("250 Recipient OK\r\n");
-}
-
-function handleData(socket: any, session: SMTPSession) {
-  if (!session.mailFrom || session.rcptTo.length === 0) {
-    socket.write("503 Bad sequence of commands\r\n");
-    return;
-  }
-
-  session.isInData = true;
-  session.data = [];
-  socket.write("354 Start mail input; end with <CRLF>.<CRLF>\r\n");
-}
-
-function handleDataContent(socket: any, session: SMTPSession, line: string) {
-  if (line === ".") {
-    // TODO: Process the email (save to database, forward, etc)
-    console.log("Email received:", {
-      from: session.mailFrom,
-      to: session.rcptTo,
-      content: session.data.join("\n")
+    stream.on('data', (chunk) => {
+      chunks.push(chunk);
     });
 
-    session.isInData = false;
-    session.data = [];
-    session.mailFrom = null;
-    session.rcptTo = [];
+    stream.on('end', async () => {
+      try {
+        const fullEmail = Buffer.concat(chunks);
+        const parsedEmail = await simpleParser(fullEmail);
 
-    socket.write("250 OK\r\n");
-    return;
-  }
-  
-  // If line starts with a period, remove one
-  if (line.startsWith(".")) {
-    line = line.slice(1);
-  }
-  session.data.push(line);
-}
-
-export const startSmtpServer = () => {
-  return Bun.listen({
-    hostname: "0.0.0.0",
-    port: SMTP_PORT,
-    socket: {
-      data(socket, data) {
-        const session = (socket as any).session ??= {
-          mailFrom: null,
-          rcptTo: [],
-          data: [],
-          isInData: false
+        const emailData: EmailData = {
+          from_address: session.envelope.mailFrom ? session.envelope.mailFrom.address : '',
+          to_addresses: session.envelope.rcptTo.map(rcpt => rcpt.address),
+          subject: parsedEmail.subject,
+          text_content: parsedEmail.text,
+          html_content: parsedEmail.html || undefined,
+          raw_email: fullEmail.toString('base64'),
+          received_at: new Date().toISOString()
         };
 
-        const line = data.toString().trim();
+        // Store the email in Supabase
+        const { error } = await supabase
+          .from('emails')
+          .insert(emailData);
 
-        if (session.isInData) {
-          handleDataContent(socket, session, line);
-          return;
+        if (error) {
+          console.error('Error storing email in Supabase:', error);
+          return callback(new Error('Failed to store email'));
         }
 
-        const [command, ...args] = line.split(" ");
-        const normalizedCommand = command.toUpperCase();
-        const argsString = args.join(" ");
+        console.log('Email stored successfully:', {
+          from_address: emailData.from_address,
+          to_addresses: emailData.to_addresses,
+          subject: emailData.subject
+        });
 
-        switch (normalizedCommand) {
-          case "HELO":
-            handleHelo(socket, argsString);
-            break;
-          case "EHLO":
-            handleEhlo(socket, argsString);
-            break;
-          case "MAIL":
-            handleMailFrom(socket, session, argsString);
-            break;
-          case "RCPT":
-            handleRcptTo(socket, session, argsString);
-            break;
-          case "DATA":
-            handleData(socket, session);
-            break;
-          case "QUIT":
-            socket.write("221 Goodbye\r\n");
-            socket.end();
-            break;
-          default:
-            socket.write("500 Unknown command\r\n");
-        }
-      },
-      open(socket) {
-        console.log("SMTP client connected");
-        socket.write("220 smtp.example.com ESMTP\r\n");
-      },
-      close(socket) {
-        console.log("SMTP client disconnected");
-      },
-      drain(socket) {
-        // Socket is ready for more data
-      },
-      error(socket, error) {
-        console.error("SMTP socket error:", error);
-      },
-    },
-    tls: TLS_OPTIONS
+        callback();
+      } catch (err) {
+        console.error('Error processing email:', err);
+        callback(new Error('Failed to process email'));
+      }
+    });
+
+    stream.on('error', (err) => {
+      console.error('Stream error:', err);
+      callback(err);
+    });
+  },
+
+  onMailFrom(address, session, callback) {
+    console.log('Mail from:', address.address);
+    callback();
+  },
+
+  onRcptTo(address, session, callback) {
+    console.log('Recipient:', address.address);
+    callback();
+  }
+};
+
+const server = new SMTPServer(options);
+
+const PORT = 2525;
+const HOST = '127.0.0.1';
+
+server.listen(PORT, HOST, () => {
+  console.log(`SMTP server is running on ${HOST}:${PORT}`);
+});
+
+// Handle server errors
+server.on('error', (err) => {
+  console.error('SMTP Server error:', err);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  server.close(() => {
+    console.log('SMTP server closed');
+    process.exit(0);
   });
-}
+});
